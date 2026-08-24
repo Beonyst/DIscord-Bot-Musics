@@ -1,718 +1,1698 @@
-﻿
+import asyncio
+import os
+import random
+from collections import deque
+from pathlib import Path
+
 import discord
 from discord.ext import commands
 import yt_dlp
-import asyncio
-
-import os
-from pathlib import Path
 from dotenv import load_dotenv
-from collections import deque
-import random
 
 
-env_path = Path(__file__).parent / 'DISCORD_TOKEN_2.env'
-print(f"Ищем .env по пути: {env_path}")
-if env_path.exists():
-    print("Файл .env найден")
-else:
-    print("Файл .env НЕ найден!")
+env_path = Path(__file__).parent / "DISCORD_TOKEN_2.env"
+load_dotenv(dotenv_path=env_path)
 
-loaded = load_dotenv(dotenv_path=env_path)
-print(f"load_dotenv вернул: {loaded}")
+TOKEN = os.getenv("DISCORD_TOKEN_2")
 
-TOKEN = os.getenv('DISCORD_TOKEN_2')
-print(f"TOKEN из os.getenv: {TOKEN}")
-if TOKEN is None:
-    print("Переменная DISCORD_TOKEN_2 не найдена!")
-    # Можно прочитать файл вручную для проверки
-    if env_path.exists():
-        with open(env_path, 'r') as f:
-            content = f.read()
-            print(f"Содержимое .env:\n{content}")
-else:
-    print(f"Токен (первые 5 символов): {TOKEN[:5]}...")
+if not TOKEN:
+    raise ValueError("Токен не найден в DISCORD_TOKEN_2.env")
+
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix='Kuno', intents=intents, case_insensitive=True)
+bot = commands.Bot(
+    command_prefix="Kuno",
+    intents=intents,
+    case_insensitive=True
+)
 
-# Хранилище очередей для каждого сервера
+
 queues = {}
 current_song = {}
 
-# Настройки yt-dlp
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'ignoreerrors': True,
+
+YDL_BASE_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "ignoreerrors": False,
+    "no_warnings": False,
+    "default_search": "auto",
+
+    "retries": 5,
+    "fragment_retries": 5,
+    "extractor_retries": 3,
+
+    "socket_timeout": 30,
+
+    "geo_bypass": True,
+
+    "prefer_ffmpeg": True,
+
+    "js_runtimes": {
+        "deno": {}
+    },
+
+    "extractor_args": {
+        "youtube": {
+            "player_client": [
+                "default",
+                "-android_vr"
+            ]
+        }
+    },
+
+    "quiet": False,
 }
 
-ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -filter:a "volume=0.5"'
+
+FFMPEG_OPTIONS = {
+    "before_options": (
+        "-reconnect 1 "
+        "-reconnect_streamed 1 "
+        "-reconnect_delay_max 5 "
+        "-rw_timeout 15000000"
+    ),
+    "options": "-vn -filter:a \"volume=0.5\"",
 }
 
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+
+def create_yt_options(use_cookies=False):
+    options = dict(YDL_BASE_OPTIONS)
+
+    options["extractor_args"] = {
+        "youtube": {
+            "player_client": [
+                "default",
+                "-android_vr"
+            ]
+        }
+    }
+
+    options["js_runtimes"] = {
+        "deno": {}
+    }
+
+    if use_cookies:
+        options["cookiesfrombrowser"] = (
+            "firefox",
+        )
+
+    return options
+
+
+def is_age_restriction_error(error):
+    text = str(error).lower()
+
+    age_errors = [
+        "sign in to confirm your age",
+        "confirm your age",
+        "this video may be inappropriate",
+        "age-restricted",
+        "age restricted",
+        "inappropriate for some users",
+        "use --cookies-from-browser",
+    ]
+
+    return any(
+        phrase in text
+        for phrase in age_errors
+    )
+
+
+def get_video_info(url):
+    first_error = None
+
+    try:
+        print(
+            "[yt-dlp] Попытка получения видео "
+            "без cookies..."
+        )
+
+        options = create_yt_options(
+            use_cookies=False
+        )
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+
+        if not info:
+            raise Exception(
+                "YouTube не вернул информацию о видео"
+            )
+
+        print(
+            "[yt-dlp] Видео получено "
+            "без cookies"
+        )
+
+        return info
+
+    except Exception as error:
+        first_error = error
+
+        print(
+            f"[yt-dlp] Первая попытка не удалась: "
+            f"{error}"
+        )
+
+        if not is_age_restriction_error(error):
+            raise
+
+    print(
+        "[yt-dlp] Обнаружено ограничение по возрасту."
+    )
+
+    print(
+        "[yt-dlp] Повторная попытка "
+        "с cookies Firefox..."
+    )
+
+    try:
+        options = create_yt_options(
+            use_cookies=True
+        )
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+
+        if not info:
+            raise Exception(
+                "YouTube не вернул информацию "
+                "при использовании cookies"
+            )
+
+        print(
+            "[yt-dlp] Видео успешно получено "
+            "с cookies Firefox"
+        )
+
+        return info
+
+    except Exception as second_error:
+        print(
+            "[yt-dlp] Не удалось получить видео "
+            "с cookies Firefox:"
+        )
+
+        print(
+            f"[yt-dlp] {second_error}"
+        )
+
+        raise Exception(
+            "YouTube требует подтверждение возраста, "
+            "но не удалось использовать cookies Firefox. "
+            "Убедитесь, что вы вошли в YouTube через Firefox "
+            "и полностью закройте Firefox перед запуском бота."
+        ) from second_error
+
+
+def get_fresh_audio_url(url):
+    first_error = None
+
+    try:
+        print(
+            "[yt-dlp] Получение свежего аудио URL "
+            "без cookies..."
+        )
+
+        options = create_yt_options(
+            use_cookies=False
+        )
+
+        options["format"] = (
+            "bestaudio[acodec!=none]/best"
+        )
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+
+        if not info:
+            raise Exception(
+                "YouTube не вернул информацию о видео"
+            )
+
+        audio_url = extract_audio_url(
+            info
+        )
+
+        print(
+            "[yt-dlp] Аудио URL получен "
+            "без cookies"
+        )
+
+        return audio_url
+
+    except Exception as error:
+        first_error = error
+
+        print(
+            f"[yt-dlp] Ошибка первой попытки "
+            f"получения аудио: {error}"
+        )
+
+        if not is_age_restriction_error(error):
+            raise
+
+    print(
+        "[yt-dlp] Требуются cookies Firefox."
+    )
+
+    try:
+        print(
+            "[yt-dlp] Повторное получение аудио "
+            "с cookies Firefox..."
+        )
+
+        options = create_yt_options(
+            use_cookies=True
+        )
+
+        options["format"] = (
+            "bestaudio[acodec!=none]/best"
+        )
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+
+        if not info:
+            raise Exception(
+                "YouTube не вернул информацию "
+                "при использовании cookies"
+            )
+
+        audio_url = extract_audio_url(
+            info
+        )
+
+        print(
+            "[yt-dlp] Аудио URL получен "
+            "с cookies Firefox"
+        )
+
+        return audio_url
+
+    except Exception as second_error:
+        print(
+            "[yt-dlp] Не удалось получить аудио "
+            "с cookies Firefox:"
+        )
+
+        print(
+            f"[yt-dlp] {second_error}"
+        )
+
+        raise Exception(
+            "Не удалось получить аудиопоток YouTube. "
+            "Если видео имеет ограничение 18+, "
+            "убедитесь, что вы вошли в YouTube через Firefox "
+            "и полностью закрыли Firefox перед запуском бота."
+        ) from second_error
+
+
+def extract_audio_url(info):
+    audio_url = info.get("url")
+
+    if audio_url:
+        return audio_url
+
+    formats = info.get(
+        "formats",
+        []
+    )
+
+    audio_formats = [
+        fmt
+        for fmt in formats
+        if (
+            fmt.get("url")
+            and fmt.get("acodec")
+            and fmt.get("acodec") != "none"
+        )
+    ]
+
+    if not audio_formats:
+        raise Exception(
+            "YouTube не предоставил доступный аудиопоток"
+        )
+
+    audio_formats.sort(
+        key=lambda fmt: (
+            fmt.get("abr") or 0,
+            fmt.get("tbr") or 0
+        ),
+        reverse=True
+    )
+
+    return audio_formats[0]["url"]
+
+
+async def get_info_async(url):
+    loop = asyncio.get_running_loop()
+
+    return await loop.run_in_executor(
+        None,
+        lambda: get_video_info(url)
+    )
+
+
+
+async def get_audio_url_async(url):
+    loop = asyncio.get_running_loop()
+
+    return await loop.run_in_executor(
+        None,
+        lambda: get_fresh_audio_url(url)
+    )
+
+
+async def add_songs_from_query(
+    query,
+    requester
+):
+    data = await get_info_async(
+        query
+    )
+
+    songs = []
+
+    if "entries" in data:
+        for entry in data["entries"]:
+            if entry:
+                songs.append(
+                    Song(
+                        entry,
+                        requester
+                    )
+                )
+    else:
+        songs.append(
+            Song(
+                data,
+                requester
+            )
+        )
+
+    return songs
 
 
 class Song:
-    def __init__(self, data, requester):
-        self.title = data.get('title', 'Неизвестное название')
-        self.url = data.get('webpage_url', data.get('url'))
-        self.audio_url = data.get('url')
-        self.duration = data.get('duration', 0)
-        self.thumbnail = data.get('thumbnail')
+    def __init__(
+        self,
+        data,
+        requester
+    ):
+        self.title = data.get(
+            "title",
+            "Неизвестное название"
+        )
+
+        self.webpage_url = (
+            data.get("webpage_url")
+            or data.get("original_url")
+            or ""
+        )
+
+        self.audio_url = None
+
+        self.duration = data.get(
+            "duration",
+            0
+        )
+
+        self.thumbnail = data.get(
+            "thumbnail"
+        )
+
         self.requester = requester
+
+        self.data = data
 
     def get_embed(self):
         embed = discord.Embed(
-            title="🎵 Сейчас играет",
-            description=f"[{self.title}]({self.url})",
+            title="Сейчас играет",
+            description=(
+                f"[{self.title}]"
+                f"({self.webpage_url})"
+            ),
             color=discord.Color.blue()
         )
+
         if self.thumbnail:
-            embed.set_thumbnail(url=self.thumbnail)
-        embed.add_field(name="Длительность",
-                        value=f"{self.duration // 60}:{self.duration % 60:02d}" if self.duration else "Неизвестно")
-        embed.add_field(name="Добавил", value=self.requester.mention)
-        embed.set_footer(text="Музыкальный бот")
+            embed.set_thumbnail(
+                url=self.thumbnail
+            )
+
+        if self.duration:
+            mins, secs = divmod(
+                int(self.duration),
+                60
+            )
+
+            embed.add_field(
+                name="Длительность",
+                value=f"{mins}:{secs:02d}"
+            )
+
+        embed.add_field(
+            name="Добавил",
+            value=self.requester.mention
+        )
+
+        embed.set_footer(
+            text="Музыкальный бот"
+        )
+
         return embed
 
 
-class MusicCog(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+async def play_next(
+    guild,
+    text_channel
+):
+    guild_id = guild.id
 
-    async def play_next(self, ctx):
-        """Воспроизводит следующий трек из очереди"""
-        guild_id = ctx.guild.id
+    voice_client = guild.voice_client
 
-        # Проверяем очередь
-        if guild_id not in queues or not queues[guild_id]:
-            # Очередь пуста
-            current_song.pop(guild_id, None)
+    if (
+        not voice_client
+        or not voice_client.is_connected()
+    ):
+        current_song.pop(
+            guild_id,
+            None
+        )
+        return
 
-            # Автоотключение через 5 минут бездействия
-            await asyncio.sleep(300)
-            if ctx.guild.voice_client and not ctx.guild.voice_client.is_playing():
-                await ctx.guild.voice_client.disconnect()
-                await ctx.send("Отключился из-за бездействия")
-            return
+    if (
+        guild_id not in queues
+        or not queues[guild_id]
+    ):
+        current_song.pop(
+            guild_id,
+            None
+        )
+        return
 
-        # Берем следующий трек из очереди
-        song = queues[guild_id].popleft()
-        current_song[guild_id] = song
+    song = queues[guild_id].popleft()
+
+    current_song[guild_id] = song
+
+    try:
+        print(
+            f"[DEBUG] Получение свежего "
+            f"аудио URL: {song.title}"
+        )
+
+        song.audio_url = await get_audio_url_async(
+            song.webpage_url
+        )
+
+        if not song.audio_url:
+            raise Exception(
+                "Не удалось получить прямую ссылку "
+                "на аудио"
+            )
+
+        source = discord.FFmpegPCMAudio(
+            song.audio_url,
+            **FFMPEG_OPTIONS
+        )
+
+        def after_playing(error):
+            if error:
+                print(
+                    f"[FFmpeg] Ошибка "
+                    f"воспроизведения: {error}"
+                )
+
+            future = asyncio.run_coroutine_threadsafe(
+                play_next(
+                    guild,
+                    text_channel
+                ),
+                bot.loop
+            )
+
+            try:
+                future.result()
+            except Exception as callback_error:
+                print(
+                    f"[DEBUG] Ошибка play_next: "
+                    f"{callback_error}"
+                )
+
+        voice_client.play(
+            source,
+            after=after_playing
+        )
+
+        await text_channel.send(
+            embed=song.get_embed()
+        )
+
+        if (
+            guild_id in queues
+            and queues[guild_id]
+        ):
+            next_song = queues[guild_id][0]
+
+            await text_channel.send(
+                f"**Следующий:** "
+                f"{next_song.title} "
+                f"(добавил: "
+                f"{next_song.requester.mention})"
+            )
+
+    except Exception as error:
+        print(
+            f"[ERROR] Не удалось воспроизвести "
+            f"{song.title}: {error}"
+        )
+
+        current_song.pop(
+            guild_id,
+            None
+        )
 
         try:
-            # Создаем аудио источник
-            source = discord.FFmpegPCMAudio(song.audio_url, **ffmpeg_options)
+            await text_channel.send(
+                f"Не удалось воспроизвести "
+                f"**{song.title}**\n"
+                f"Ошибка: `{error}`"
+            )
+        except Exception:
+            pass
 
-            def after_playing(error):
-                if error:
-                    print(f'Ошибка воспроизведения: {error}')
+        await play_next(
+            guild,
+            text_channel
+        )
 
-                # Запускаем следующий трек
-                coro = self.play_next(ctx)
-                asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
 
-            # Воспроизводим
-            ctx.voice_client.play(source, after=after_playing)
+async def disconnect_if_empty(guild):
+    voice_client = guild.voice_client
 
-            # Отправляем информацию о треке
-            await ctx.send(embed=song.get_embed())
+    if not voice_client:
+        return
 
-            # Показываем следующий трек в очереди, если есть
-            if guild_id in queues and queues[guild_id]:
-                next_song = queues[guild_id][0]
-                await ctx.send(f"**Следующий:** {next_song.title} (добавил: {next_song.requester.mention})")
+    if len(voice_client.channel.members) > 1:
+        return
 
-        except Exception as e:
-            await ctx.send(f"Ошибка при воспроизведении: {str(e)}")
-            # Пытаемся воспроизвести следующий трек
-            coro = self.play_next(ctx)
-            asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+    await asyncio.sleep(
+        60
+    )
 
-    @commands.command(name="play")
-    async def play_command(self, ctx, *, query):
-        """Добавляет трек в очередь или начинает воспроизведение"""
-        # Проверяем, находится ли пользователь в голосовом канале
+    if (
+        voice_client.is_connected()
+        and len(voice_client.channel.members) == 1
+    ):
+        await voice_client.disconnect()
+
+        queues.pop(
+            guild.id,
+            None
+        )
+
+        current_song.pop(
+            guild.id,
+            None
+        )
+
+
+class MusicCog(commands.Cog):
+    def __init__(
+        self,
+        bot_instance
+    ):
+        self.bot = bot_instance
+
+    @commands.command(
+        name="play"
+    )
+    async def play_command(
+        self,
+        ctx,
+        *,
+        query
+    ):
         if not ctx.author.voice:
-            await ctx.send("Вы должны быть в голосовом канале!")
+            await ctx.send(
+                "Вы должны быть в голосовом канале!"
+            )
             return
 
-        voice_channel = ctx.author.voice.channel
+        voice_channel = (
+            ctx.author.voice.channel
+        )
 
-        # Подключаемся к голосовому каналу
         if not ctx.voice_client:
             await voice_channel.connect()
-        elif ctx.voice_client.channel != voice_channel:
-            await ctx.voice_client.move_to(voice_channel)
+
+        elif (
+            ctx.voice_client.channel
+            != voice_channel
+        ):
+            await ctx.voice_client.move_to(
+                voice_channel
+            )
 
         async with ctx.typing():
             try:
-                # Получаем информацию о видео
-                data = await self.bot.loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+                songs = await add_songs_from_query(
+                    query,
+                    ctx.author
+                )
 
-                songs = []
-                if 'entries' in data:
-                    # Это плейлист или несколько результатов
-                    for entry in data['entries']:
-                        if entry:
-                            songs.append(Song(entry, ctx.author))
-                else:
-                    # Один трек
-                    songs.append(Song(data, ctx.author))
+                if not songs:
+                    await ctx.send(
+                        "Не удалось найти треки."
+                    )
+                    return
 
-                # Инициализируем очередь для сервера если нужно
-                if ctx.guild.id not in queues:
-                    queues[ctx.guild.id] = deque()
+                guild_id = ctx.guild.id
 
-                # Добавляем треки в очередь
+                if guild_id not in queues:
+                    queues[guild_id] = deque()
+
                 for song in songs:
-                    queues[ctx.guild.id].append(song)
+                    queues[guild_id].append(
+                        song
+                    )
 
-                await ctx.send(f"✅ Добавлено {len(songs)} треков в очередь")
+                await ctx.send(
+                    f"Добавлено треков: "
+                    f"**{len(songs)}**"
+                )
 
-                # Если ничего не играет, начинаем воспроизведение
-                if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
-                    await self.play_next(ctx)
-                else:
-                    # Показываем что добавили
-                    if len(songs) == 1:
-                        await ctx.send(
-                            f"Трек **{songs[0].title}** добавлен в очередь (позиция #{len(queues[ctx.guild.id])})")
-                    else:
-                        await ctx.send(f"Треки добавлены в очередь. Треков в очереди: {len(queues[ctx.guild.id])}")
+                if (
+                    not ctx.voice_client.is_playing()
+                    and not ctx.voice_client.is_paused()
+                ):
+                    await play_next(
+                        ctx.guild,
+                        ctx.channel
+                    )
 
-            except Exception as e:
-                await ctx.send(f"Ошибка: {str(e)}")
+            except Exception as error:
+                await ctx.send(
+                    f"Ошибка при обработке запроса:\n"
+                    f"`{error}`"
+                )
 
-    @commands.command(name="queue")
-    async def queue_command(self, ctx):
-        """Показывает текущую очередь"""
+                print(
+                    f"[DEBUG] Ошибка команды play: "
+                    f"{error}"
+                )
+
+    @commands.command(
+        name="queue"
+    )
+    async def queue_command(
+        self,
+        ctx
+    ):
         guild_id = ctx.guild.id
 
-        if guild_id not in queues or not queues[guild_id]:
-            await ctx.send("Очередь пуста!")
+        if (
+            guild_id not in queues
+            or not queues[guild_id]
+        ):
+            await ctx.send(
+                "Очередь пуста."
+            )
             return
 
-        # Создаем embed с очередью
         embed = discord.Embed(
-            title="🎵 Очередь воспроизведения",
+            title="Очередь воспроизведения",
             color=discord.Color.green()
         )
 
-        # Текущий трек
         if guild_id in current_song:
+            song = current_song[guild_id]
+
             embed.add_field(
                 name="Сейчас играет",
-                value=f"**{current_song[guild_id].title}**\n(добавил: {current_song[guild_id].requester.mention})",
+                value=(
+                    f"**{song.title}**\n"
+                    f"(добавил: "
+                    f"{song.requester.mention})"
+                ),
                 inline=False
             )
 
-        # Следующие треки (первые 10)
-        queue_list = list(queues[guild_id])
-        if queue_list:
-            queue_text = ""
-            for i, song in enumerate(queue_list[:10], 1):
-                duration = f"{song.duration // 60}:{song.duration % 60:02d}" if song.duration else "?:??"
-                queue_text += f"**{i}.** {song.title} ({duration}) - {song.requester.mention}\n"
+        queue_list = list(
+            queues[guild_id]
+        )
 
-            if len(queue_list) > 10:
-                queue_text += f"\n...и еще {len(queue_list) - 10} треков"
+        text = ""
 
-            embed.add_field(name="Очередь", value=queue_text, inline=False)
+        for index, song in enumerate(
+            queue_list[:10],
+            1
+        ):
+            if song.duration:
+                duration = (
+                    f"{song.duration // 60}:"
+                    f"{song.duration % 60:02d}"
+                )
+            else:
+                duration = "?:??"
 
-        embed.set_footer(text=f"Всего треков в очереди: {len(queue_list)}")
-        await ctx.send(embed=embed)
+            text += (
+                f"**{index}.** "
+                f"{song.title} "
+                f"({duration}) - "
+                f"{song.requester.mention}\n"
+            )
 
-    @commands.command(name="skip")
-    async def skip_command(self, ctx):
-        """Пропускает текущий трек"""
-        if not ctx.voice_client or not ctx.voice_client.is_connected():
-            await ctx.send("Я не подключен к голосовому каналу!")
+        if len(queue_list) > 10:
+            text += (
+                f"\n...и еще "
+                f"{len(queue_list) - 10} треков"
+            )
+
+        if text:
+            embed.add_field(
+                name="Очередь",
+                value=text,
+                inline=False
+            )
+
+        await ctx.send(
+            embed=embed
+        )
+
+    @commands.command(
+        name="skip"
+    )
+    async def skip_command(
+        self,
+        ctx
+    ):
+        if (
+            not ctx.voice_client
+            or not ctx.voice_client.is_connected()
+        ):
+            await ctx.send(
+                "Я не подключен "
+                "к голосовому каналу."
+            )
             return
 
         if not ctx.voice_client.is_playing():
-            await ctx.send("Сейчас ничего не играет!")
+            await ctx.send(
+                "Сейчас ничего не играет."
+            )
             return
 
-        # Останавливаем текущий трек
         ctx.voice_client.stop()
-        await ctx.send("⏭️ Трек пропущен!")
 
-    @commands.command(name="remove")
-    async def remove_command(self, ctx, index: int):
-        """Удаляет трек из очереди по номеру"""
+        await ctx.send(
+            "Трек пропущен."
+        )
+
+    @commands.command(
+        name="stop"
+    )
+    async def stop_command(
+        self,
+        ctx
+    ):
+        if not ctx.voice_client:
+            await ctx.send(
+                "Бот не подключен "
+                "к голосовому каналу."
+            )
+            return
+
+        ctx.voice_client.stop()
+
         guild_id = ctx.guild.id
 
-        if guild_id not in queues or not queues[guild_id]:
-            await ctx.send("Очередь пуста!")
+        queues.pop(
+            guild_id,
+            None
+        )
+
+        current_song.pop(
+            guild_id,
+            None
+        )
+
+        await ctx.voice_client.disconnect()
+
+        await ctx.send(
+            "Музыка остановлена, "
+            "очередь очищена."
+        )
+
+    @commands.command(
+        name="pause"
+    )
+    async def pause_command(
+        self,
+        ctx
+    ):
+        if (
+            ctx.voice_client
+            and ctx.voice_client.is_playing()
+        ):
+            ctx.voice_client.pause()
+
+            await ctx.send(
+                "Музыка приостановлена."
+            )
+        else:
+            await ctx.send(
+                "Сейчас ничего не играет."
+            )
+
+    @commands.command(
+        name="resume"
+    )
+    async def resume_command(
+        self,
+        ctx
+    ):
+        if (
+            ctx.voice_client
+            and ctx.voice_client.is_paused()
+        ):
+            ctx.voice_client.resume()
+
+            await ctx.send(
+                "Музыка возобновлена."
+            )
+        else:
+            await ctx.send(
+                "Музыка не находится на паузе."
+            )
+
+    @commands.command(
+        name="remove"
+    )
+    async def remove_command(
+        self,
+        ctx,
+        index: int
+    ):
+        guild_id = ctx.guild.id
+
+        if (
+            guild_id not in queues
+            or not queues[guild_id]
+        ):
+            await ctx.send(
+                "Очередь пуста."
+            )
             return
 
-        if index < 1 or index > len(queues[guild_id]):
-            await ctx.send(f"Неверный номер! Введите число от 1 до {len(queues[guild_id])}")
+        if (
+            index < 1
+            or index > len(queues[guild_id])
+        ):
+            await ctx.send(
+                f"Неверный номер. "
+                f"Введите число от 1 до "
+                f"{len(queues[guild_id])}"
+            )
             return
 
-        # Удаляем трек (индексация с 0)
-        removed_song = list(queues[guild_id])[index - 1]
-        del queues[guild_id][index - 1]
+        queue_list = list(
+            queues[guild_id]
+        )
 
-        await ctx.send(f"🗑️ Удален трек: **{removed_song.title}**")
+        removed = queue_list.pop(
+            index - 1
+        )
 
-    @commands.command(name="clear")
-    async def clear_command(self, ctx):
-        """Очищает очередь"""
+        queues[guild_id] = deque(
+            queue_list
+        )
+
+        await ctx.send(
+            f"Удален трек: "
+            f"**{removed.title}**"
+        )
+
+    @commands.command(
+        name="clear"
+    )
+    async def clear_command(
+        self,
+        ctx
+    ):
         guild_id = ctx.guild.id
 
         if guild_id in queues:
             queues[guild_id].clear()
-            await ctx.send("🧹 Очередь очищена!")
-        else:
-            await ctx.send("Очередь уже пуста!")
 
-    @commands.command(name="nowplaying")
-    async def nowplaying_command(self, ctx):
-        """Показывает текущий трек"""
+        await ctx.send(
+            "Очередь очищена."
+        )
+
+    @commands.command(
+        name="nowplaying"
+    )
+    async def nowplaying_command(
+        self,
+        ctx
+    ):
         guild_id = ctx.guild.id
 
-        if guild_id not in current_song or not current_song[guild_id]:
-            await ctx.send("Сейчас ничего не играет!")
+        if (
+            guild_id in current_song
+            and current_song[guild_id]
+        ):
+            await ctx.send(
+                embed=current_song[guild_id].get_embed()
+            )
+        else:
+            await ctx.send(
+                "Сейчас ничего не играет."
+            )
+
+    @commands.command(
+        name="shuffle"
+    )
+    async def shuffle_command(
+        self,
+        ctx
+    ):
+        guild_id = ctx.guild.id
+
+        if (
+            guild_id not in queues
+            or len(queues[guild_id]) < 2
+        ):
+            await ctx.send(
+                "В очереди недостаточно треков "
+                "для перемешивания."
+            )
             return
 
-        await ctx.send(embed=current_song[guild_id].get_embed())
+        queue_list = list(
+            queues[guild_id]
+        )
 
-    @commands.command(name="shuffle")
-    async def shuffle_command(self, ctx):
-        """Перемешивает очередь"""
+        random.shuffle(
+            queue_list
+        )
+
+        queues[guild_id] = deque(
+            queue_list
+        )
+
+        await ctx.send(
+            "Очередь перемешана."
+        )
+
+    @commands.command(
+        name="leave"
+    )
+    async def leave_command(
+        self,
+        ctx
+    ):
         guild_id = ctx.guild.id
 
-        if guild_id not in queues or len(queues[guild_id]) < 2:
-            await ctx.send("В очереди недостаточно треков для перемешивания!")
+        if not ctx.voice_client:
+            await ctx.send(
+                "Я не подключен "
+                "к голосовому каналу."
+            )
             return
 
-        queue_list = list(queues[guild_id])
-        random.shuffle(queue_list)
-        queues[guild_id] = deque(queue_list)
+        queues.pop(
+            guild_id,
+            None
+        )
 
-        await ctx.send("🔀 Очередь перемешана!")
+        current_song.pop(
+            guild_id,
+            None
+        )
 
-    @commands.command(name="leave")
-    async def leave_command(self, ctx):
-        """Отключает бота от голосового канала и очищает очередь"""
-        guild_id = ctx.guild.id
+        await ctx.voice_client.disconnect()
 
-        if ctx.voice_client:
-            # Очищаем очередь для этого сервера
-            if guild_id in queues:
-                queues[guild_id].clear()
-
-            if guild_id in current_song:
-                current_song.pop(guild_id)
-
-            await ctx.voice_client.disconnect()
-            await ctx.send("👋 Отключился от голосового канала")
-        else:
-            await ctx.send("Я не подключен к голосовому каналу!")
-
-    @commands.command(name="pause")
-    async def pause_command(self, ctx):
-        """Приостанавливает воспроизведение"""
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            ctx.voice_client.pause()
-            await ctx.send("⏸️ Музыка приостановлена")
-
-    @commands.command(name="resume")
-    async def resume_command(self, ctx):
-        """Возобновляет воспроизведение"""
-        if ctx.voice_client and ctx.voice_client.is_paused():
-            ctx.voice_client.resume()
-            await ctx.send("▶️ Музыка возобновлена")
-
-    @commands.command(name="stop")
-    async def stop_command(self, ctx):
-        """Останавливает воспроизведение и очищает очередь"""
-        if ctx.voice_client:
-            ctx.voice_client.stop()
-
-            guild_id = ctx.guild.id
-            if guild_id in queues:
-                queues[guild_id].clear()
-            if guild_id in current_song:
-                current_song.pop(guild_id)
-
-            await ctx.send("⏹️ Воспроизведение остановлено и очередь очищена")
+        await ctx.send(
+            "Отключился от голосового канала."
+        )
 
 
 class SlashCog(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+    def __init__(
+        self,
+        bot_instance
+    ):
+        self.bot = bot_instance
 
     @discord.app_commands.command(
         name="play",
         description="Воспроизвести музыку из YouTube"
     )
-    @discord.app_commands.describe(query="Ссылка на YouTube или название трека")
-    async def play_slash(self, interaction: discord.Interaction, query: str) -> None:
-        """Слеш-команда для добавления трека"""
-        # Отвечаем немедленно, чтобы Discord не показывал "Приложение не отвечает"
-        await interaction.response.defer(thinking=True)
+    @discord.app_commands.describe(
+        query="Ссылка на YouTube или название трека"
+    )
+    async def play_slash(
+        self,
+        interaction,
+        query: str
+    ):
+        await interaction.response.defer(
+            thinking=True
+        )
 
-        # Проверяем, находится ли пользователь в голосовом канале
         if not interaction.user.voice:
-            await interaction.followup.send("Вы должны быть в голосовом канале!", ephemeral=True)
+            await interaction.followup.send(
+                "Вы должны быть в голосовом канале!",
+                ephemeral=True
+            )
             return
 
-        voice_channel = interaction.user.voice.channel
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.followup.send(
+                "Команда доступна только на сервере.",
+                ephemeral=True
+            )
+            return
+
+        voice_channel = (
+            interaction.user.voice.channel
+        )
+
+        if not guild.voice_client:
+            await voice_channel.connect()
+
+        elif (
+            guild.voice_client.channel
+            != voice_channel
+        ):
+            await guild.voice_client.move_to(
+                voice_channel
+            )
 
         try:
-            # Подключаемся к голосовому каналу
-            if not interaction.guild.voice_client:
-                await voice_channel.connect()
-            elif interaction.guild.voice_client.channel != voice_channel:
-                await interaction.guild.voice_client.move_to(voice_channel)
+            songs = await add_songs_from_query(
+                query,
+                interaction.user
+            )
 
-            # Получаем информацию о видео
-            data = await self.bot.loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+            if not songs:
+                await interaction.followup.send(
+                    "Не удалось найти треки.",
+                    ephemeral=True
+                )
+                return
 
-            songs = []
-            if 'entries' in data:
-                # Это плейлист или несколько результатов
-                for entry in data['entries']:
-                    if entry:
-                        songs.append(Song(entry, interaction.user))
-            else:
-                # Один трек
-                songs.append(Song(data, interaction.user))
+            guild_id = guild.id
 
-            # Инициализируем очередь для сервера если нужно
-            guild_id = interaction.guild.id
             if guild_id not in queues:
                 queues[guild_id] = deque()
 
-            # Добавляем треки в очередь
             for song in songs:
-                queues[guild_id].append(song)
+                queues[guild_id].append(
+                    song
+                )
 
-            await interaction.followup.send(f"✅ Добавлено {len(songs)} треков в очередь")
+            await interaction.followup.send(
+                f"Добавлено треков: "
+                f"**{len(songs)}**"
+            )
 
-            # Получаем Cog с музыкальными функциями
-            music_cog = self.bot.get_cog('MusicCog')
+            if (
+                not guild.voice_client.is_playing()
+                and not guild.voice_client.is_paused()
+            ):
+                await play_next(
+                    guild,
+                    interaction.channel
+                )
 
-            # Если ничего не играет, начинаем воспроизведение
-            if not interaction.guild.voice_client.is_playing() and not interaction.guild.voice_client.is_paused():
-                # Создаем контекст для play_next
-                ctx = await self.bot.get_context(interaction)
-                await music_cog.play_next(ctx)
-            else:
-                # Показываем что добавили
-                if len(songs) == 1:
-                    await interaction.followup.send(
-                        f"Трек **{songs[0].title}** добавлен в очередь (позиция #{len(queues[guild_id])})")
-                else:
-                    await interaction.followup.send(
-                        f"Треки добавлены в очередь. Треков в очереди: {len(queues[guild_id])}")
+        except Exception as error:
+            print(
+                f"[DEBUG] Ошибка slash play: "
+                f"{error}"
+            )
 
-        except Exception as e:
-            await interaction.followup.send(f"Ошибка: {str(e)}", ephemeral=True)
+            await interaction.followup.send(
+                f"Ошибка:\n`{error}`",
+                ephemeral=True
+            )
 
     @discord.app_commands.command(
         name="queue",
         description="Показать текущую очередь"
     )
-    async def queue_slash(self, interaction: discord.Interaction) -> None:
+    async def queue_slash(
+        self,
+        interaction
+    ):
         guild_id = interaction.guild.id
 
-        if guild_id not in queues or not queues[guild_id]:
-            await interaction.response.send_message("Очередь пуста!", ephemeral=True)
+        if (
+            guild_id not in queues
+            or not queues[guild_id]
+        ):
+            await interaction.response.send_message(
+                "Очередь пуста.",
+                ephemeral=True
+            )
             return
 
-        # Создаем embed с очередью
         embed = discord.Embed(
-            title="🎵 Очередь воспроизведения",
+            title="Очередь воспроизведения",
             color=discord.Color.green()
         )
 
-        # Текущий трек
         if guild_id in current_song:
+            song = current_song[guild_id]
+
             embed.add_field(
                 name="Сейчас играет",
-                value=f"**{current_song[guild_id].title}**\n(добавил: {current_song[guild_id].requester.mention})",
+                value=(
+                    f"**{song.title}**\n"
+                    f"(добавил: "
+                    f"{song.requester.mention})"
+                ),
                 inline=False
             )
 
-        # Следующие треки (первые 10)
-        queue_list = list(queues[guild_id])
-        if queue_list:
-            queue_text = ""
-            for i, song in enumerate(queue_list[:10], 1):
-                duration = f"{song.duration // 60}:{song.duration % 60:02d}" if song.duration else "?:??"
-                queue_text += f"**{i}.** {song.title} ({duration}) - {song.requester.mention}\n"
+        queue_list = list(
+            queues[guild_id]
+        )
 
-            if len(queue_list) > 10:
-                queue_text += f"\n...и еще {len(queue_list) - 10} треков"
+        text = ""
 
-            embed.add_field(name="Очередь", value=queue_text, inline=False)
+        for index, song in enumerate(
+            queue_list[:10],
+            1
+        ):
+            if song.duration:
+                duration = (
+                    f"{song.duration // 60}:"
+                    f"{song.duration % 60:02d}"
+                )
+            else:
+                duration = "?:??"
 
-        embed.set_footer(text=f"Всего треков в очереди: {len(queue_list)}")
-        await interaction.response.send_message(embed=embed)
+            text += (
+                f"**{index}.** "
+                f"{song.title} "
+                f"({duration}) - "
+                f"{song.requester.mention}\n"
+            )
+
+        if len(queue_list) > 10:
+            text += (
+                f"\n...и еще "
+                f"{len(queue_list) - 10} треков"
+            )
+
+        if text:
+            embed.add_field(
+                name="Очередь",
+                value=text,
+                inline=False
+            )
+
+        await interaction.response.send_message(
+            embed=embed
+        )
 
     @discord.app_commands.command(
         name="skip",
         description="Пропустить текущий трек"
     )
-    async def skip_slash(self, interaction: discord.Interaction) -> None:
-        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_connected():
-            await interaction.response.send_message("Я не подключен к голосовому каналу!", ephemeral=True)
+    async def skip_slash(
+        self,
+        interaction
+    ):
+        voice_client = (
+            interaction.guild.voice_client
+        )
+
+        if (
+            not voice_client
+            or not voice_client.is_connected()
+        ):
+            await interaction.response.send_message(
+                "Я не подключен "
+                "к голосовому каналу.",
+                ephemeral=True
+            )
             return
 
-        if not interaction.guild.voice_client.is_playing():
-            await interaction.response.send_message("Сейчас ничего не играет!", ephemeral=True)
+        if not voice_client.is_playing():
+            await interaction.response.send_message(
+                "Сейчас ничего не играет.",
+                ephemeral=True
+            )
             return
 
-        # Останавливаем текущий трек
-        interaction.guild.voice_client.stop()
-        await interaction.response.send_message("⏭️ Трек пропущен!")
+        voice_client.stop()
+
+        await interaction.response.send_message(
+            "Трек пропущен."
+        )
 
     @discord.app_commands.command(
         name="pause",
         description="Приостановить воспроизведение"
     )
-    async def pause_slash(self, interaction: discord.Interaction) -> None:
-        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
-            interaction.guild.voice_client.pause()
-            await interaction.response.send_message("⏸️ Музыка приостановлена")
+    async def pause_slash(
+        self,
+        interaction
+    ):
+        voice_client = (
+            interaction.guild.voice_client
+        )
+
+        if (
+            voice_client
+            and voice_client.is_playing()
+        ):
+            voice_client.pause()
+
+            await interaction.response.send_message(
+                "Музыка приостановлена."
+            )
         else:
-            await interaction.response.send_message("Сейчас ничего не играет!", ephemeral=True)
+            await interaction.response.send_message(
+                "Сейчас ничего не играет.",
+                ephemeral=True
+            )
 
     @discord.app_commands.command(
         name="resume",
-        description="Возобновить воспроизведение"
+        description="Возобновить музыку"
     )
-    async def resume_slash(self, interaction: discord.Interaction) -> None:
-        if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
-            interaction.guild.voice_client.resume()
-            await interaction.response.send_message("▶️ Музыка возобновлена")
+    async def resume_slash(
+        self,
+        interaction
+    ):
+        voice_client = (
+            interaction.guild.voice_client
+        )
+
+        if (
+            voice_client
+            and voice_client.is_paused()
+        ):
+            voice_client.resume()
+
+            await interaction.response.send_message(
+                "Музыка возобновлена."
+            )
         else:
-            await interaction.response.send_message("Музыка не на паузе!", ephemeral=True)
+            await interaction.response.send_message(
+                "Музыка не находится на паузе.",
+                ephemeral=True
+            )
 
     @discord.app_commands.command(
         name="stop",
-        description="Остановить музыку"
+        description="Остановить музыку и очистить очередь"
     )
-    async def stop_slash(self, interaction: discord.Interaction) -> None:
-        if interaction.guild.voice_client:
-            interaction.guild.voice_client.stop()
+    async def stop_slash(
+        self,
+        interaction
+    ):
+        voice_client = (
+            interaction.guild.voice_client
+        )
 
-            guild_id = interaction.guild.id
-            if guild_id in queues:
-                queues[guild_id].clear()
-            if guild_id in current_song:
-                current_song.pop(guild_id)
+        if not voice_client:
+            await interaction.response.send_message(
+                "Я не подключен "
+                "к голосовому каналу.",
+                ephemeral=True
+            )
+            return
 
-            await interaction.response.send_message("⏹️ Воспроизведение остановлено и очередь очищена")
-        else:
-            await interaction.response.send_message("Я не подключен к голосовому каналу!", ephemeral=True)
+        voice_client.stop()
+
+        guild_id = interaction.guild.id
+
+        queues.pop(
+            guild_id,
+            None
+        )
+
+        current_song.pop(
+            guild_id,
+            None
+        )
+
+        await voice_client.disconnect()
+
+        await interaction.response.send_message(
+            "Воспроизведение остановлено "
+            "и очередь очищена."
+        )
 
     @discord.app_commands.command(
         name="nowplaying",
         description="Показать текущий трек"
     )
-    async def nowplaying_slash(self, interaction: discord.Interaction) -> None:
+    async def nowplaying_slash(
+        self,
+        interaction
+    ):
         guild_id = interaction.guild.id
 
-        if guild_id not in current_song or not current_song[guild_id]:
-            await interaction.response.send_message("Сейчас ничего не играет!", ephemeral=True)
-            return
-
-        await interaction.response.send_message(embed=current_song[guild_id].get_embed())
+        if (
+            guild_id in current_song
+            and current_song[guild_id]
+        ):
+            await interaction.response.send_message(
+                embed=current_song[guild_id].get_embed()
+            )
+        else:
+            await interaction.response.send_message(
+                "Сейчас ничего не играет.",
+                ephemeral=True
+            )
 
     @discord.app_commands.command(
         name="leave",
         description="Отключить бота от голосового канала"
     )
-    async def leave_slash(self, interaction: discord.Interaction) -> None:
+    async def leave_slash(
+        self,
+        interaction
+    ):
         guild_id = interaction.guild.id
+        voice_client = interaction.guild.voice_client
 
-        if interaction.guild.voice_client:
-            # Очищаем очередь для этого сервера
-            if guild_id in queues:
-                queues[guild_id].clear()
+        if not voice_client:
+            await interaction.response.send_message(
+                "Я не подключен "
+                "к голосовому каналу.",
+                ephemeral=True
+            )
+            return
 
-            if guild_id in current_song:
-                current_song.pop(guild_id)
+        queues.pop(
+            guild_id,
+            None
+        )
 
-            await interaction.guild.voice_client.disconnect()
-            await interaction.response.send_message("👋 Отключился от голосового канала")
-        else:
-            await interaction.response.send_message("Я не подключен к голосовому каналу!", ephemeral=True)
+        current_song.pop(
+            guild_id,
+            None
+        )
+
+        await voice_client.disconnect()
+
+        await interaction.response.send_message(
+            "Отключился от голосового канала."
+        )
 
     @discord.app_commands.command(
         name="shuffle",
         description="Перемешать очередь"
     )
-    async def shuffle_slash(self, interaction: discord.Interaction) -> None:
+    async def shuffle_slash(
+        self,
+        interaction
+    ):
         guild_id = interaction.guild.id
 
-        if guild_id not in queues or len(queues[guild_id]) < 2:
-            await interaction.response.send_message("В очереди недостаточно треков для перемешивания!", ephemeral=True)
+        if (
+            guild_id not in queues
+            or len(queues[guild_id]) < 2
+        ):
+            await interaction.response.send_message(
+                "В очереди недостаточно треков "
+                "для перемешивания.",
+                ephemeral=True
+            )
             return
 
-        queue_list = list(queues[guild_id])
-        random.shuffle(queue_list)
-        queues[guild_id] = deque(queue_list)
+        queue_list = list(
+            queues[guild_id]
+        )
 
-        await interaction.response.send_message("🔀 Очередь перемешана!")
+        random.shuffle(
+            queue_list
+        )
+
+        queues[guild_id] = deque(
+            queue_list
+        )
+
+        await interaction.response.send_message(
+            "Очередь перемешана."
+        )
 
     @discord.app_commands.command(
         name="clear",
         description="Очистить очередь"
     )
-    async def clear_slash(self, interaction: discord.Interaction) -> None:
+    async def clear_slash(
+        self,
+        interaction
+    ):
         guild_id = interaction.guild.id
 
         if guild_id in queues:
             queues[guild_id].clear()
-            await interaction.response.send_message("🧹 Очередь очищена!")
-        else:
-            await interaction.response.send_message("Очередь уже пуста!", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Очередь очищена."
+        )
 
     @discord.app_commands.command(
         name="remove",
         description="Удалить трек из очереди"
     )
-    @discord.app_commands.describe(index="Номер трека в очереди")
-    async def remove_slash(self, interaction: discord.Interaction, index: int) -> None:
+    @discord.app_commands.describe(
+        index="Номер трека в очереди"
+    )
+    async def remove_slash(
+        self,
+        interaction,
+        index: int
+    ):
         guild_id = interaction.guild.id
 
-        if guild_id not in queues or not queues[guild_id]:
-            await interaction.response.send_message("Очередь пуста!", ephemeral=True)
-            return
-
-        if index < 1 or index > len(queues[guild_id]):
+        if (
+            guild_id not in queues
+            or not queues[guild_id]
+        ):
             await interaction.response.send_message(
-                f"Неверный номер! Введите число от 1 до {len(queues[guild_id])}", ephemeral=True)
+                "Очередь пуста.",
+                ephemeral=True
+            )
             return
 
-        # Удаляем трек (индексация с 0)
-        removed_song = list(queues[guild_id])[index - 1]
-        del queues[guild_id][index - 1]
+        if (
+            index < 1
+            or index > len(queues[guild_id])
+        ):
+            await interaction.response.send_message(
+                f"Неверный номер. "
+                f"Введите число от 1 до "
+                f"{len(queues[guild_id])}",
+                ephemeral=True
+            )
+            return
 
-        await interaction.response.send_message(f"🗑️ Удален трек: **{removed_song.title}**")
+        queue_list = list(
+            queues[guild_id]
+        )
+
+        removed = queue_list.pop(
+            index - 1
+        )
+
+        queues[guild_id] = deque(
+            queue_list
+        )
+
+        await interaction.response.send_message(
+            f"Удален трек: "
+            f"**{removed.title}**"
+        )
 
     @discord.app_commands.command(
         name="rules",
-        description="Показать правила сервера",
+        description="Показать правила сервера"
     )
-    async def rules_slash(self, interaction: discord.Interaction) -> None:
+    async def rules_slash(
+        self,
+        interaction
+    ):
         rules_text = (
             "**Правила сервера:**\n"
             "1. Уважайте других участников.\n"
             "2. Запрещена реклама и спам.\n"
             "3. Не используйте запрещённые слова.\n"
             "4. Соблюдайте тематику каналов.\n"
-            "5. Выполняйте указания модераторов.\n"
+            "5. Выполняйте указания модераторов."
         )
-        await interaction.response.send_message(rules_text, ephemeral=False)
+
+        await interaction.response.send_message(
+            rules_text
+        )
 
     @discord.app_commands.command(
         name="ping",
-        description="Проверить отклик бота",
+        description="Проверить отклик бота"
     )
-    async def ping_slash(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(f"Pong! Задержка: {round(self.bot.latency * 1000)}мс", ephemeral=True)
+    async def ping_slash(
+        self,
+        interaction
+    ):
+        latency = round(
+            self.bot.latency * 1000
+        )
+
+        await interaction.response.send_message(
+            f"Pong! Задержка: {latency}мс",
+            ephemeral=True
+        )
 
     @discord.app_commands.command(
         name="help",
-        description="Показать все команды бота",
+        description="Показать все команды бота"
     )
-    async def help_slash(self, interaction: discord.Interaction) -> None:
+    async def help_slash(
+        self,
+        interaction
+    ):
         help_text = (
-            "**🎵 Музыкальные команды:**\n"
+            "**Музыкальные команды:**\n"
             "`/play [запрос]` - Добавить трек в очередь\n"
-            "`/queue` - Показать текущую очередь\n"
-            "`/skip` - Пропустить текущий трек\n"
+            "`/queue` - Показать очередь\n"
+            "`/skip` - Пропустить трек\n"
             "`/pause` - Приостановить музыку\n"
             "`/resume` - Возобновить музыку\n"
-            "`/stop` - Остановить музыку и очистить очередь\n"
-            "`/nowplaying` - Показать текущий трек\n"
+            "`/stop` - Остановить музыку\n"
+            "`/nowplaying` - Текущий трек\n"
             "`/shuffle` - Перемешать очередь\n"
             "`/clear` - Очистить очередь\n"
-            "`/remove [номер]` - Удалить трек из очереди\n"
+            "`/remove [номер]` - Удалить трек\n"
             "`/leave` - Отключить бота\n\n"
-            "**📋 Информационные команды:**\n"
-            "`/ping` - Проверить отклик бота\n"
-            "`/rules` - Показать правила сервера\n\n"
-            "**💡 Префиксные команды:**\n"
-            "Также доступны команды с префиксом `Kuno`\n"
-            "Например: `Kunoplay песня`"
+            "**Информационные команды:**\n"
+            "`/ping` - Проверить задержку\n"
+            "`/rules` - Правила сервера"
         )
 
         embed = discord.Embed(
-            title="🎵 Помощь по командам бота",
+            title="Помощь по командам бота",
             description=help_text,
             color=discord.Color.blue()
         )
-        embed.set_footer(text="Музыкальный бот")
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True
+        )
 
 
 @bot.event
-async def on_voice_state_update(member, before, after):
-    """Автоотключение если бот один в канале"""
-    # Проверяем только если это не сам бот
+async def on_voice_state_update(
+    member,
+    before,
+    after
+):
     if member == bot.user:
         return
 
-    # Если бот в голосовом канале
-    if before.channel and before.channel.guild.voice_client:
-        voice_client = before.channel.guild.voice_client
+    if not before.channel:
+        return
 
-        # Проверяем сколько людей в канале с ботом
-        if len(voice_client.channel.members) == 1:
-            guild_id = before.channel.guild.id
+    guild = before.channel.guild
 
-            # Очищаем очередь
-            if guild_id in queues:
-                queues[guild_id].clear()
+    voice_client = guild.voice_client
 
-            if guild_id in current_song:
-                current_song.pop(guild_id)
+    if not voice_client:
+        return
 
-            # Отключаемся через 60 секунд
-            await asyncio.sleep(60)
+    if len(voice_client.channel.members) != 1:
+        return
 
-            # Проверяем еще раз
-            if voice_client.is_connected() and len(voice_client.channel.members) == 1:
-                await voice_client.disconnect()
-                try:
-                    await before.channel.send("Отключился из-за отсутствия слушателей")
-                except:
-                    pass
+    asyncio.create_task(
+        disconnect_if_empty(guild)
+    )
 
 
 @bot.event
 async def on_ready():
-    print(f'Бот {bot.user} готов к работе!')
-    print(f'Префикс команд: Kuno')
-    print(f'Доступны слеш-команды через /')
+    print(
+        f"Бот {bot.user} готов к работе!"
+    )
 
-    # Добавляем коги
-    await bot.add_cog(MusicCog(bot))
-    await bot.add_cog(SlashCog(bot))
+    print(
+        f"Версия yt-dlp: "
+        f"{yt_dlp.version.__version__}"
+    )
 
-    # Синхронизируем слеш-команды
+    print(
+        "JavaScript runtime: Deno"
+    )
+
+    print(
+        "Cookies fallback: Firefox"
+    )
+
+    print(
+        "Префикс команд: Kuno"
+    )
+
+
+async def setup_bot():
+    await bot.add_cog(
+        MusicCog(bot)
+    )
+
+    await bot.add_cog(
+        SlashCog(bot)
+    )
+
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Синхронизировано {len(synced)} слеш-команд")
-    except Exception as e:
-        print(f"❌ Ошибка синхронизации слеш-команд: {e}")
+
+        print(
+            f"Синхронизировано "
+            f"{len(synced)} slash-команд"
+        )
+
+    except Exception as error:
+        print(
+            f"Ошибка синхронизации "
+            f"slash-команд: {error}"
+        )
 
 
-bot.run(TOKEN)
+async def main():
+    await setup_bot()
+
+    await bot.start(
+        TOKEN
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(
+        main()
+    )
